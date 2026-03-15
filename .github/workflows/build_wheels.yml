@@ -20,20 +20,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest]
         python: ['3.10', '3.11', '3.12', '3.13']
         pytorch: ['2.5.0', '2.6.0', '2.7.0', '2.8.0', '2.10.0']
         cuda: ['12.4', '12.6', '12.8', '13.0']
         exclude:
+          # CUDA 12.6: torch 2.5.x wheels are not published for cu126
           - pytorch: '2.5.0'
-            cuda: '13.0'
-          - pytorch: '2.6.0'
-            cuda: '13.0'
+            cuda: '12.6'
+          # CUDA 12.8: torch < 2.7 wheels are not published for cu128
           - pytorch: '2.5.0'
             cuda: '12.8'
           - pytorch: '2.6.0'
             cuda: '12.8'
-          # Add more exclusions as needed for known incompatibilities
+          # CUDA 13.0: torch < 2.9 wheels are not published for cu130
+          - pytorch: '2.5.0'
+            cuda: '13.0'
+          - pytorch: '2.6.0'
+            cuda: '13.0'
+          - pytorch: '2.7.0'
+            cuda: '13.0'
+          - pytorch: '2.8.0'
+            cuda: '13.0'
 
     defaults:
       run:
@@ -88,74 +96,28 @@ jobs:
           PT_VERSION: ${{ matrix.pytorch }}
           CUDA_VERSION: ${{ matrix.cuda }}
         run: |
-          mkdir -p dist_all
+          # Capture the repo root so all absolute paths are consistent, even
+          # after pushd/popd changes the working directory inside the loop.
+          REPO_ROOT="$(pwd)"
+          mkdir -p "${REPO_ROOT}/dist_all" "${REPO_ROOT}/dist_temp"
           SUBMODULES=("submodules/diff-gaussian-rasterization" "submodules/diff-gaussian-rasterization_ms" "submodules/diff-gaussian-rasterization_msori" "submodules/simple-knn")
-          
+
           for SUBMOD in "${SUBMODULES[@]}"; do
             echo "Building $SUBMOD..."
-            pushd $SUBMOD
-            
-            # Patch Windows compile flags if needed (from inspiration)
+            pushd "${REPO_ROOT}/${SUBMOD}"
+
+            # Patch Windows compile flags if needed
             if [[ "${{ runner.os }}" == "Windows" ]]; then
-              python - <<'PY'
-              import os
-              from pathlib import Path
-              setup_py = Path("setup.py")
-              if setup_py.exists():
-                  text = setup_py.read_text(encoding="utf-8")
-                  modified = False
-                  if '"/GR-"' in text:
-                      text = text.replace('"/GR-"', '"/GR"')
-                      modified = True
-                  if '"/MT"' in text:
-                      text = text.replace('"/MT"', '"/MD"')
-                      modified = True
-                  if modified:
-                      setup_py.write_text(text, encoding="utf-8")
-                      print("Patched flags for Windows")
-              PY
+              python "${REPO_ROOT}/.github/scripts/patch_windows_setup.py"
             fi
 
-            python -m build --wheel --no-isolation --outdir ../../dist_temp
+            python -m build --wheel --no-isolation --outdir "${REPO_ROOT}/dist_temp"
             popd
-            
-            # Rename and move wheels
-            python - <<'PY'
-            import os
-            import re
-            from pathlib import Path
 
-            pt = os.environ["PT_VERSION"].replace(".", "_")
-            cu = os.environ["CUDA_VERSION"].replace(".", "_")
-            build_tag = f"1pt{pt}cu{cu}"
-            wheel_name_pattern = re.compile(
-                r"^(?P<distribution>[^-]+)-(?P<version>[^-]+)"
-                r"(?:-(?P<build>[0-9][0-9A-Za-z_]*))?"
-                r"-(?P<python_tag>[^-]+)-(?P<abi_tag>[^-]+)-(?P<platform_tag>[^-]+)$"
-            )
-
-            dist_temp = Path("dist_temp")
-            dist_all = Path("dist_all")
-            for wheel_path in dist_temp.glob("*.whl"):
-                match = wheel_name_pattern.fullmatch(wheel_path.stem)
-                if not match:
-                    continue
-                parts = match.groupdict()
-                if parts["build"]:
-                    target_name = wheel_path.name
-                else:
-                    target_name = (
-                        f"{parts['distribution']}-{parts['version']}-{build_tag}-"
-                        f"{parts['python_tag']}-{parts['abi_tag']}-{parts['platform_tag']}.whl"
-                    )
-                target = dist_all / target_name
-                wheel_path.rename(target)
-                print(f"Moved and renamed: {target_name}")
-
-            # Clean up temp for next submodule
-            for f in dist_temp.glob("*"):
-                if f.is_file(): f.unlink()
-            PY
+            # Rename and move wheels, then clean dist_temp for the next submodule.
+            # Runs from REPO_ROOT (restored by popd), so dist_temp/ and dist_all/
+            # resolve correctly as relative paths inside the script.
+            python "${REPO_ROOT}/.github/scripts/rename_wheels.py"
           done
 
       - name: Upload Wheels as Artifact
