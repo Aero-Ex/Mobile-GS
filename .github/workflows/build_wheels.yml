@@ -33,6 +33,13 @@ jobs:
             cuda: '12.8'
           - pytorch: '2.6.0'
             cuda: '12.8'
+          # CUDA 12.4: torch >= 2.7 wheels are not published for cu124
+          - pytorch: '2.7.0'
+            cuda: '12.4'
+          - pytorch: '2.8.0'
+            cuda: '12.4'
+          - pytorch: '2.10.0'
+            cuda: '12.4'
           # CUDA 13.0: torch < 2.9 wheels are not published for cu130
           - pytorch: '2.5.0'
             cuda: '13.0'
