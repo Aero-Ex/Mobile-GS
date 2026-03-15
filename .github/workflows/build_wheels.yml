@@ -109,6 +109,7 @@ jobs:
           mkdir -p "${REPO_ROOT}/dist_all" "${REPO_ROOT}/dist_temp"
           SUBMODULES=("submodules/diff-gaussian-rasterization" "submodules/diff-gaussian-rasterization_ms" "submodules/diff-gaussian-rasterization_msori" "submodules/simple-knn")
 
+          BUILD_FAILED=0
           for SUBMOD in "${SUBMODULES[@]}"; do
             echo "Building $SUBMOD..."
             pushd "${REPO_ROOT}/${SUBMOD}"
@@ -118,25 +119,38 @@ jobs:
               python "${REPO_ROOT}/.github/scripts/patch_windows_setup.py"
             fi
 
-            python -m build --wheel --no-isolation --outdir "${REPO_ROOT}/dist_temp"
-            popd
-
-            # Rename and move wheels, then clean dist_temp for the next submodule.
-            # Runs from REPO_ROOT (restored by popd), so dist_temp/ and dist_all/
-            # resolve correctly as relative paths inside the script.
-            python "${REPO_ROOT}/.github/scripts/rename_wheels.py"
+            if python -m build --wheel --no-isolation --outdir "${REPO_ROOT}/dist_temp"; then
+              popd
+              # Rename and move wheels, then clean dist_temp for the next submodule.
+              # Runs from REPO_ROOT (restored by popd), so dist_temp/ and dist_all/
+              # resolve correctly as relative paths inside the script.
+              python "${REPO_ROOT}/.github/scripts/rename_wheels.py"
+            else
+              echo "::error::Build failed for $SUBMOD"
+              BUILD_FAILED=1
+              popd
+              # Clean up any partial output so the next submodule starts fresh.
+              rm -f "${REPO_ROOT}/dist_temp"/*.whl 2>/dev/null || true
+            fi
           done
 
+          if [[ "$BUILD_FAILED" -ne 0 ]]; then
+            echo "::error::One or more submodule builds failed (see above). Any successfully built wheels have been uploaded."
+            exit 1
+          fi
+
       - name: Upload Wheels as Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Mobile-GS-${{ matrix.os }}-py${{ matrix.python }}-pt${{ matrix.pytorch }}-cu${{ matrix.cuda }}
           path: dist_all/*.whl
+          if-no-files-found: warn
 
       - name: Upload Wheels to Release page
-        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        if: always() && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
           files: dist_all/*.whl
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
