@@ -10,7 +10,7 @@
  */
 
 #pragma once
-#include <torch/extension.h>
+#include <torch/types.h>
 #include <cstdio>
 #include <tuple>
 #include <string>
