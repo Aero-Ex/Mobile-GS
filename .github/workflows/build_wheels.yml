@@ -1,0 +1,173 @@
+name: Build Mobile-GS Wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to upload wheels to when run manually (e.g. v0.1.0)'
+        required: false
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build_wheels:
+    name: Build (${{ matrix.os }}, Py ${{ matrix.python }}, PT ${{ matrix.pytorch }}, CUDA ${{ matrix.cuda }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.11', '3.12', '3.13']
+        pytorch: ['2.5.0', '2.6.0', '2.7.0', '2.8.0', '2.10.0']
+        cuda: ['12.4', '12.6', '12.8', '13.0']
+        exclude:
+          - pytorch: '2.5.0'
+            cuda: '13.0'
+          - pytorch: '2.6.0'
+            cuda: '13.0'
+          - pytorch: '2.5.0'
+            cuda: '12.8'
+          - pytorch: '2.6.0'
+            cuda: '12.8'
+          # Add more exclusions as needed for known incompatibilities
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          cuda: '${{ matrix.cuda }}.0'
+          log-file-suffix: 'py${{ matrix.python }}-pt${{ matrix.pytorch }}-cu${{ matrix.cuda }}.txt'
+
+      - name: Install Standard Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build wheel setuptools
+
+      - name: Install PyTorch
+        run: |
+          # Format CUDA version for PyTorch URL (e.g., 12.6 -> cu126)
+          CUDA_WHL="cu${{ matrix.cuda }}"
+          CUDA_WHL="${CUDA_WHL//./}"
+          
+          # Forces pip to install the exact PyTorch version from the matrix
+          pip install torch==${{ matrix.pytorch }} torchvision --index-url https://download.pytorch.org/whl/$CUDA_WHL
+
+      - name: Dynamically Set Target Architectures
+        run: |
+          if [[ "${{ matrix.cuda }}" == "12.4" ]] || [[ "${{ matrix.cuda }}" == "12.6" ]]; then
+            echo "ARCH_LIST=7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0+PTX" >> $GITHUB_ENV
+          elif [[ "${{ matrix.cuda }}" == "13.0" ]]; then
+            # CUDA 13 no longer supports compute_70/compute_72.
+            echo "ARCH_LIST=7.5;8.0;8.6;8.7;8.9;9.0;10.0;12.0+PTX" >> $GITHUB_ENV
+          else
+            # 10.0 and 12.0 added for Blackwell on CUDA 12.8+
+            echo "ARCH_LIST=7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;12.0+PTX" >> $GITHUB_ENV
+          fi
+
+      - name: Build Wheels for Submodules
+        env:
+          TORCH_CUDA_ARCH_LIST: ${{ env.ARCH_LIST }}
+          PT_VERSION: ${{ matrix.pytorch }}
+          CUDA_VERSION: ${{ matrix.cuda }}
+        run: |
+          mkdir -p dist_all
+          SUBMODULES=("submodules/diff-gaussian-rasterization" "submodules/diff-gaussian-rasterization_ms" "submodules/diff-gaussian-rasterization_msori" "submodules/simple-knn")
+          
+          for SUBMOD in "${SUBMODULES[@]}"; do
+            echo "Building $SUBMOD..."
+            pushd $SUBMOD
+            
+            # Patch Windows compile flags if needed (from inspiration)
+            if [[ "${{ runner.os }}" == "Windows" ]]; then
+              python - <<'PY'
+import os
+from pathlib import Path
+setup_py = Path("setup.py")
+if setup_py.exists():
+    text = setup_py.read_text(encoding="utf-8")
+    modified = False
+    if '"/GR-"' in text:
+        text = text.replace('"/GR-"', '"/GR"')
+        modified = True
+    if '"/MT"' in text:
+        text = text.replace('"/MT"', '"/MD"')
+        modified = True
+    if modified:
+        setup_py.write_text(text, encoding="utf-8")
+        print("Patched flags for Windows")
+PY
+            fi
+
+            python -m build --wheel --no-isolation --outdir ../../dist_temp
+            popd
+            
+            # Rename and move wheels
+            python - <<'PY'
+import os
+import re
+from pathlib import Path
+
+pt = os.environ["PT_VERSION"].replace(".", "_")
+cu = os.environ["CUDA_VERSION"].replace(".", "_")
+build_tag = f"1pt{pt}cu{cu}"
+wheel_name_pattern = re.compile(
+    r"^(?P<distribution>[^-]+)-(?P<version>[^-]+)"
+    r"(?:-(?P<build>[0-9][0-9A-Za-z_]*))?"
+    r"-(?P<python_tag>[^-]+)-(?P<abi_tag>[^-]+)-(?P<platform_tag>[^-]+)$"
+)
+
+dist_temp = Path("dist_temp")
+dist_all = Path("dist_all")
+for wheel_path in dist_temp.glob("*.whl"):
+    match = wheel_name_pattern.fullmatch(wheel_path.stem)
+    if not match:
+        continue
+    parts = match.groupdict()
+    if parts["build"]:
+        target_name = wheel_path.name
+    else:
+        target_name = (
+            f"{parts['distribution']}-{parts['version']}-{build_tag}-"
+            f"{parts['python_tag']}-{parts['abi_tag']}-{parts['platform_tag']}.whl"
+        )
+    target = dist_all / target_name
+    wheel_path.rename(target)
+    print(f"Moved and renamed: {target_name}")
+
+# Clean up temp for next submodule
+for f in dist_temp.glob("*"):
+    if f.is_file(): f.unlink()
+PY
+          done
+
+      - name: Upload Wheels as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mobile-GS-${{ matrix.os }}-py${{ matrix.python }}-pt${{ matrix.pytorch }}-cu${{ matrix.cuda }}
+          path: dist_all/*.whl
+
+      - name: Upload Wheels to Release page
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
+          files: dist_all/*.whl
+          fail_on_unmatched_files: true
