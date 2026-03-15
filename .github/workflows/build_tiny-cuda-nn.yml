@@ -1,0 +1,152 @@
+name: Build Dependencies
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to upload wheels to when run manually (e.g. v0.1.0)'
+        required: false
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build_deps:
+    name: Build (${{ matrix.os }}, Py ${{ matrix.python }}, PT ${{ matrix.pytorch }}, CUDA ${{ matrix.cuda }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ['3.10', '3.11', '3.12', '3.13']
+        pytorch: ['2.5.0', '2.6.0', '2.7.0', '2.8.0', '2.9.0', '2.10.0']
+        cuda: ['12.4', '12.6', '12.8', '13.0']
+        exclude:
+          # CUDA 12.6: torch 2.5.x wheels are not published for cu126
+          - pytorch: '2.5.0'
+            cuda: '12.6'
+          # CUDA 12.8: torch < 2.7 wheels are not published for cu128
+          - pytorch: '2.5.0'
+            cuda: '12.8'
+          - pytorch: '2.6.0'
+            cuda: '12.8'
+          # CUDA 12.4: torch >= 2.7 wheels are not published for cu124
+          - pytorch: '2.7.0'
+            cuda: '12.4'
+          - pytorch: '2.8.0'
+            cuda: '12.4'
+          - pytorch: '2.10.0'
+            cuda: '12.4'
+          # CUDA 13.0: torch < 2.9 wheels are not published for cu130
+          - pytorch: '2.5.0'
+            cuda: '13.0'
+          - pytorch: '2.6.0'
+            cuda: '13.0'
+          - pytorch: '2.7.0'
+            cuda: '13.0'
+          - pytorch: '2.8.0'
+            cuda: '13.0'
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          cuda: '${{ matrix.cuda }}.0'
+          log-file-suffix: 'deps-py${{ matrix.python }}-pt${{ matrix.pytorch }}-cu${{ matrix.cuda }}.txt'
+
+      - name: Install Standard Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build wheel setuptools
+
+      - name: Install PyTorch
+        run: |
+          # Format CUDA version for PyTorch URL (e.g., 12.6 -> cu126)
+          CUDA_WHL="cu${{ matrix.cuda }}"
+          CUDA_WHL="${CUDA_WHL//./}"
+          pip install torch==${{ matrix.pytorch }} torchvision --index-url https://download.pytorch.org/whl/$CUDA_WHL
+
+      - name: Dynamically Set Target Architectures
+        run: |
+          if [[ "${{ matrix.cuda }}" == "12.4" ]] || [[ "${{ matrix.cuda }}" == "12.6" ]]; then
+            # tiny-cuda-nn uses TCNN_CUDA_ARCHITECTURES (integers)
+            echo "ARCH_LIST=70;72;75;80;86;87;89;90" >> $GITHUB_ENV
+          elif [[ "${{ matrix.cuda }}" == "13.0" ]]; then
+            echo "ARCH_LIST=75;80;86;87;89;90;100;120" >> $GITHUB_ENV
+          else
+            echo "ARCH_LIST=70;72;75;80;86;87;89;90;100;120" >> $GITHUB_ENV
+          fi
+
+      - name: Build tiny-cuda-nn
+        env:
+          TCNN_CUDA_ARCHITECTURES: ${{ env.ARCH_LIST }}
+          PT_VERSION: ${{ matrix.pytorch }}
+          CUDA_VERSION: ${{ matrix.cuda }}
+        run: |
+          REPO_ROOT="$(pwd)"
+          mkdir -p "${REPO_ROOT}/dist_all"
+          mkdir -p "${REPO_ROOT}/dist_temp"
+
+          git clone --recursive https://github.com/NVlabs/tiny-cuda-nn
+          cd tiny-cuda-nn/bindings/torch
+
+          # Apply Windows patch if needed
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            python "${REPO_ROOT}/.github/scripts/patch_windows_setup.py"
+          else
+            # On Linux, tiny-cuda-nn needs libcuda.so which is in stubs for CI
+            export LIBRARY_PATH="/usr/local/cuda/lib64/stubs:$LIBRARY_PATH"
+          fi
+
+          # tiny-cuda-nn's setup.py (or its dependencies) often requires pkg_resources, 
+          # which was removed in setuptools >= 70.
+          pip install "setuptools<70.0.0"
+          python -m build --wheel --no-isolation --outdir "${REPO_ROOT}/dist_temp"
+          
+          # Rename and move
+          cd "${REPO_ROOT}"
+          python ".github/scripts/rename_wheels.py"
+
+      - name: Download RAPIDS wheels
+        env:
+          PT_VERSION: ${{ matrix.pytorch }}
+          CUDA_VERSION: ${{ matrix.cuda }}
+        run: |
+          REPO_ROOT="$(pwd)"
+          mkdir -p "${REPO_ROOT}/dist_temp"
+          # Using the exact requirements provided by user
+          pip download --extra-index-url https://pypi.nvidia.com "cudf-cu11==25.2.*" "cuml-cu11==25.2.*" --dest "${REPO_ROOT}/dist_temp" --no-deps
+          
+          # Rename and move these too (they might already have tags, rename_wheels handles that)
+          python ".github/scripts/rename_wheels.py"
+
+      - name: Upload Wheels as Artifact
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mobile-GS-Deps-${{ matrix.os }}-py${{ matrix.python }}-pt${{ matrix.pytorch }}-cu${{ matrix.cuda }}
+          path: dist_all/*.whl
+          if-no-files-found: warn
+
+      - name: Upload Wheels to Release page
+        if: (success() || failure()) && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
+          files: dist_all/*.whl
+          fail_on_unmatched_files: false
