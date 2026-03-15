@@ -103,40 +103,77 @@ jobs:
           PT_VERSION: ${{ matrix.pytorch }}
           CUDA_VERSION: ${{ matrix.cuda }}
         run: |
-          # Capture the repo root so all absolute paths are consistent, even
-          # after pushd/popd changes the working directory inside the loop.
+          # Capture the repo root so all absolute paths are consistent regardless
+          # of which directory is current at any point during the loop.
           REPO_ROOT="$(pwd)"
-          mkdir -p "${REPO_ROOT}/dist_all" "${REPO_ROOT}/dist_temp"
-          SUBMODULES=("submodules/diff-gaussian-rasterization" "submodules/diff-gaussian-rasterization_ms" "submodules/diff-gaussian-rasterization_msori" "submodules/simple-knn")
+          mkdir -p "${REPO_ROOT}/dist_all"
+
+          SUBMODULES=(
+            "submodules/diff-gaussian-rasterization"
+            "submodules/diff-gaussian-rasterization_ms"
+            "submodules/diff-gaussian-rasterization_msori"
+            "submodules/simple-knn"
+          )
+
+          FAILED_SUBMODS=()
 
           for SUBMOD in "${SUBMODULES[@]}"; do
-            echo "Building $SUBMOD..."
-            pushd "${REPO_ROOT}/${SUBMOD}"
+            echo "--- Building ${SUBMOD} ---"
 
-            # Patch Windows compile flags if needed
-            if [[ "${{ runner.os }}" == "Windows" ]]; then
-              python "${REPO_ROOT}/.github/scripts/patch_windows_setup.py"
+            # Guard: verify the submodule directory was checked out.
+            if [[ ! -d "${REPO_ROOT}/${SUBMOD}" ]]; then
+              echo "::error::Submodule directory not found: ${REPO_ROOT}/${SUBMOD}"
+              FAILED_SUBMODS+=("${SUBMOD}")
+              continue
             fi
 
-            python -m build --wheel --no-isolation --outdir "${REPO_ROOT}/dist_temp"
-            popd
+            # Always start each iteration with a clean dist_temp so stale files
+            # from a previous build (successful or failed) can never bleed through.
+            rm -rf "${REPO_ROOT}/dist_temp"
+            mkdir -p "${REPO_ROOT}/dist_temp"
 
-            # Rename and move wheels, then clean dist_temp for the next submodule.
-            # Runs from REPO_ROOT (restored by popd), so dist_temp/ and dist_all/
-            # resolve correctly as relative paths inside the script.
-            python "${REPO_ROOT}/.github/scripts/rename_wheels.py"
+            # Build inside a subshell so that directory-state (cd) is fully
+            # isolated from the outer loop — no pushd/popd fragility.
+            BUILD_OK=0
+            (
+              cd "${REPO_ROOT}/${SUBMOD}"
+              if [[ "${{ runner.os }}" == "Windows" ]]; then
+                python "${REPO_ROOT}/.github/scripts/patch_windows_setup.py"
+              fi
+              python -m build --wheel --no-isolation --outdir "${REPO_ROOT}/dist_temp"
+            ) && BUILD_OK=1
+
+            if [[ "${BUILD_OK}" -eq 1 ]]; then
+              # Rename and move wheels into dist_all; also cleans dist_temp.
+              # rename_wheels.py is run from REPO_ROOT so relative paths resolve correctly.
+              if ! python "${REPO_ROOT}/.github/scripts/rename_wheels.py"; then
+                echo "::error::rename_wheels.py failed for ${SUBMOD}"
+                FAILED_SUBMODS+=("${SUBMOD}")
+              fi
+            else
+              echo "::error::Build failed for ${SUBMOD}"
+              FAILED_SUBMODS+=("${SUBMOD}")
+            fi
           done
 
+          if [[ "${#FAILED_SUBMODS[@]}" -gt 0 ]]; then
+            echo "::error::The following submodule(s) failed to build: ${FAILED_SUBMODS[*]}"
+            echo "::error::Any successfully built wheels have been preserved in dist_all/."
+            exit 1
+          fi
+
       - name: Upload Wheels as Artifact
+        if: success() || failure()
         uses: actions/upload-artifact@v4
         with:
           name: Mobile-GS-${{ matrix.os }}-py${{ matrix.python }}-pt${{ matrix.pytorch }}-cu${{ matrix.cuda }}
           path: dist_all/*.whl
+          if-no-files-found: warn
 
       - name: Upload Wheels to Release page
-        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        if: (success() || failure()) && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
           files: dist_all/*.whl
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
