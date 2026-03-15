@@ -98,22 +98,22 @@ jobs:
             # Patch Windows compile flags if needed (from inspiration)
             if [[ "${{ runner.os }}" == "Windows" ]]; then
               python - <<'PY'
-import os
-from pathlib import Path
-setup_py = Path("setup.py")
-if setup_py.exists():
-    text = setup_py.read_text(encoding="utf-8")
-    modified = False
-    if '"/GR-"' in text:
-        text = text.replace('"/GR-"', '"/GR"')
-        modified = True
-    if '"/MT"' in text:
-        text = text.replace('"/MT"', '"/MD"')
-        modified = True
-    if modified:
-        setup_py.write_text(text, encoding="utf-8")
-        print("Patched flags for Windows")
-PY
+              import os
+              from pathlib import Path
+              setup_py = Path("setup.py")
+              if setup_py.exists():
+                  text = setup_py.read_text(encoding="utf-8")
+                  modified = False
+                  if '"/GR-"' in text:
+                      text = text.replace('"/GR-"', '"/GR"')
+                      modified = True
+                  if '"/MT"' in text:
+                      text = text.replace('"/MT"', '"/MD"')
+                      modified = True
+                  if modified:
+                      setup_py.write_text(text, encoding="utf-8")
+                      print("Patched flags for Windows")
+              PY
             fi
 
             python -m build --wheel --no-isolation --outdir ../../dist_temp
@@ -121,41 +121,41 @@ PY
             
             # Rename and move wheels
             python - <<'PY'
-import os
-import re
-from pathlib import Path
+            import os
+            import re
+            from pathlib import Path
 
-pt = os.environ["PT_VERSION"].replace(".", "_")
-cu = os.environ["CUDA_VERSION"].replace(".", "_")
-build_tag = f"1pt{pt}cu{cu}"
-wheel_name_pattern = re.compile(
-    r"^(?P<distribution>[^-]+)-(?P<version>[^-]+)"
-    r"(?:-(?P<build>[0-9][0-9A-Za-z_]*))?"
-    r"-(?P<python_tag>[^-]+)-(?P<abi_tag>[^-]+)-(?P<platform_tag>[^-]+)$"
-)
+            pt = os.environ["PT_VERSION"].replace(".", "_")
+            cu = os.environ["CUDA_VERSION"].replace(".", "_")
+            build_tag = f"1pt{pt}cu{cu}"
+            wheel_name_pattern = re.compile(
+                r"^(?P<distribution>[^-]+)-(?P<version>[^-]+)"
+                r"(?:-(?P<build>[0-9][0-9A-Za-z_]*))?"
+                r"-(?P<python_tag>[^-]+)-(?P<abi_tag>[^-]+)-(?P<platform_tag>[^-]+)$"
+            )
 
-dist_temp = Path("dist_temp")
-dist_all = Path("dist_all")
-for wheel_path in dist_temp.glob("*.whl"):
-    match = wheel_name_pattern.fullmatch(wheel_path.stem)
-    if not match:
-        continue
-    parts = match.groupdict()
-    if parts["build"]:
-        target_name = wheel_path.name
-    else:
-        target_name = (
-            f"{parts['distribution']}-{parts['version']}-{build_tag}-"
-            f"{parts['python_tag']}-{parts['abi_tag']}-{parts['platform_tag']}.whl"
-        )
-    target = dist_all / target_name
-    wheel_path.rename(target)
-    print(f"Moved and renamed: {target_name}")
+            dist_temp = Path("dist_temp")
+            dist_all = Path("dist_all")
+            for wheel_path in dist_temp.glob("*.whl"):
+                match = wheel_name_pattern.fullmatch(wheel_path.stem)
+                if not match:
+                    continue
+                parts = match.groupdict()
+                if parts["build"]:
+                    target_name = wheel_path.name
+                else:
+                    target_name = (
+                        f"{parts['distribution']}-{parts['version']}-{build_tag}-"
+                        f"{parts['python_tag']}-{parts['abi_tag']}-{parts['platform_tag']}.whl"
+                    )
+                target = dist_all / target_name
+                wheel_path.rename(target)
+                print(f"Moved and renamed: {target_name}")
 
-# Clean up temp for next submodule
-for f in dist_temp.glob("*"):
-    if f.is_file(): f.unlink()
-PY
+            # Clean up temp for next submodule
+            for f in dist_temp.glob("*"):
+                if f.is_file(): f.unlink()
+            PY
           done
 
       - name: Upload Wheels as Artifact
