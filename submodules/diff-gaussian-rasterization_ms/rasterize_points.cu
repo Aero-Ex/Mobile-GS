@@ -10,7 +10,7 @@
  */
 
 #include <math.h>
-#include <torch/extension.h>
+#include <torch/types.h>
 #include <cstdio>
 #include <sstream>
 #include <iostream>
