@@ -30,7 +30,7 @@ namespace detail
 	{
 		GLM_FUNC_QUALIFIER static float call(float x)
 		{
-			return x >= 0.0f ? x : -x;
+			return fabsf(x);
 		}
 	};
 #endif
