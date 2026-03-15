@@ -23,6 +23,15 @@ addr = None
 
 listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+def disconnect():
+    global conn
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    conn = None
+
 def init(wish_host, wish_port):
     global host, port, listener
     host = wish_host
@@ -37,22 +46,42 @@ def try_connect():
         conn, addr = listener.accept()
         print(f"\nConnected by {addr}")
         conn.settimeout(None)
-    except Exception as inst:
+    except (BlockingIOError, socket.timeout):
+        # No pending GUI client yet; train/pretrain call try_connect() each iteration.
         pass
-            
+    except Exception as inst:
+        disconnect()
+        print(f"\nNetwork GUI connection failed: {inst}")
+
+def _recv_exact(num_bytes):
+    global conn
+    data = bytearray()
+    while len(data) < num_bytes:
+        chunk = conn.recv(num_bytes - len(data))
+        if not chunk:
+            raise ConnectionError("Socket connection closed while receiving data.")
+        data.extend(chunk)
+    return bytes(data)
+             
 def read():
     global conn
-    messageLength = conn.recv(4)
+    messageLength = _recv_exact(4)
     messageLength = int.from_bytes(messageLength, 'little')
-    message = conn.recv(messageLength)
+    message = _recv_exact(messageLength)
     return json.loads(message.decode("utf-8"))
 
 def send(message_bytes, verify):
     global conn
-    if message_bytes != None:
-        conn.sendall(message_bytes)
-    conn.sendall(len(verify).to_bytes(4, 'little'))
-    conn.sendall(bytes(verify, 'ascii'))
+    if conn is None:
+        return
+    try:
+        if message_bytes is not None:
+            conn.sendall(message_bytes)
+        conn.sendall(len(verify).to_bytes(4, 'little'))
+        conn.sendall(bytes(verify, 'ascii'))
+    except Exception:
+        disconnect()
+        raise
 
 def receive():
     message = read()
@@ -80,6 +109,7 @@ def receive():
         except Exception as e:
             print("")
             traceback.print_exc()
+            disconnect()
             raise e
         return custom_cam, do_training, do_shs_python, do_rot_scale_python, keep_alive, scaling_modifier
     else:
