@@ -1,0 +1,44 @@
+name: Upload Wheels to Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'The ID of the workflow run (from Build Mobile-GS Wheels) to get wheels from'
+        required: true
+        type: string
+      release_tag:
+        description: 'Release tag to upload wheels to (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts from build run
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.run_id }}
+          path: all_artifacts
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Consolidate all wheels
+        run: |
+          mkdir -p dist
+          # Find all .whl files in all artifact subdirectories and move them to dist/
+          find all_artifacts -name "*.whl" -type f -exec cp {} dist/ \;
+          echo "Found wheels:"
+          ls -R dist/
+
+      - name: Upload Wheels to Release page
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          files: dist/*.whl
+          fail_on_unmatched_files: true
+          # Preserve existing files in the release if any
+          append_body: true
